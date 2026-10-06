@@ -1,16 +1,29 @@
 """Download pinned Android build dependencies into .tools (no global installation)."""
 from pathlib import Path
-import concurrent.futures, hashlib, json, urllib.request, zipfile
+import concurrent.futures, hashlib, platform, subprocess, urllib.request, zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / '.tools'
+HOST = {'Windows': 'windows', 'Darwin': 'darwin'}.get(platform.system(), 'linux')
+# Host-specific archives; SHA-1s from Google's repository2-3.xml.
+NDK = {
+    'windows': ('https://dl.google.com/android/repository/android-ndk-r27c-windows.zip', 'ac5f7762764b1f15341094e148ad4f847d050c38'),
+    'darwin': ('https://dl.google.com/android/repository/android-ndk-r27c-darwin.zip', '0217c10ffbec496bb9fbfbb3c6fc2477c6b77297'),
+    'linux': ('https://dl.google.com/android/repository/android-ndk-r27c-linux.zip', None),
+}[HOST]
+BUILD_TOOLS = {
+    'windows': ('https://dl.google.com/android/repository/build-tools_r35_windows.zip', 'af059bb67cf7786f45ee0db85e2d24985df1b4b6'),
+    'darwin': ('https://dl.google.com/android/repository/build-tools_r35_macosx.zip', '93ab8ce91230e067b5add4bfa79919c52b27f072'),
+    'linux': ('https://dl.google.com/android/repository/build-tools_r35_linux.zip', None),
+}[HOST]
+NINJA = {'windows': 'ninja-win.zip', 'darwin': 'ninja-mac.zip', 'linux': 'ninja-linux.zip'}[HOST]
 PACKAGES = [
-    ('ndk', 'https://dl.google.com/android/repository/android-ndk-r27c-windows.zip', 'ac5f7762764b1f15341094e148ad4f847d050c38'),
+    ('ndk', *NDK),
     ('platform', 'https://dl.google.com/android/repository/platform-34-ext12_r01.zip', 'ba80ccbcc29b29f25ac926a08c0b2777f0bce842'),
-    ('buildtools', 'https://dl.google.com/android/repository/build-tools_r35_windows.zip', 'af059bb67cf7786f45ee0db85e2d24985df1b4b6'),
+    ('buildtools', *BUILD_TOOLS),
     ('sdl', 'https://github.com/libsdl-org/SDL/releases/download/release-2.30.11/SDL2-2.30.11.zip', None),
     ('openxr', 'https://repo.maven.apache.org/maven2/org/khronos/openxr/openxr_loader_for_android/1.1.43/openxr_loader_for_android-1.1.43.aar', None),
-    ('ninja', 'https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip', None),
+    ('ninja', 'https://github.com/ninja-build/ninja/releases/download/v1.12.1/' + NINJA, None),
 ]
 
 def fetch(package):
@@ -29,8 +42,12 @@ def fetch(package):
         raise RuntimeError('Checksum mismatch: ' + str(archive))
     print('Extracting ' + name, flush=True)
     dest.mkdir(exist_ok=True)
-    with zipfile.ZipFile(archive) as z:
-        z.extractall(dest)
+    if HOST == 'windows':
+        with zipfile.ZipFile(archive) as z:
+            z.extractall(dest)
+    else:
+        # unzip keeps executable bits and symlinks; zipfile drops both.
+        subprocess.run(['unzip', '-q', '-o', str(archive), '-d', str(dest)], check=True)
     (dest / '.complete').write_text(url + '\n')
 
 if __name__ == '__main__':

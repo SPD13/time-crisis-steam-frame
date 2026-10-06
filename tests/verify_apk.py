@@ -1,9 +1,16 @@
 """Verify ROM integrity, the ARM64 ELF headers, manifest identity and exported entry point."""
 from pathlib import Path
-import argparse,hashlib,json,math,re,struct,subprocess,zipfile
+import argparse,hashlib,json,math,re,struct,subprocess,sys,zipfile
 ROOT=Path(__file__).resolve().parents[1]
-p=argparse.ArgumentParser();p.add_argument('--apk',type=Path,default=ROOT/'artifacts/TimeCrisisVR-quest3-debug.apk');args=p.parse_args()
-apk=args.apk.resolve();info=json.loads(apk.with_name('build-info.json').read_text());bundled=info['roms_bundled']
+sys.path.insert(0,str(ROOT/'tools'));import bootstrap
+EXE='.exe' if bootstrap.HOST=='windows' else ''
+BT=ROOT/'.tools/buildtools/android-15'
+TARGETS={'quest':('org.timecrisis.quest',ROOT/'artifacts/TimeCrisisVR-quest3-debug.apk','package-libs'),
+         'frame':('org.timecrisis.frame',ROOT/'artifacts/frame/TimeCrisisVR-frame-debug.apk','package-libs-frame')}
+p=argparse.ArgumentParser();p.add_argument('--target',choices=sorted(TARGETS),default='quest');p.add_argument('--apk',type=Path);args=p.parse_args()
+package,default_apk,libs_dir=TARGETS[args.target]
+apk=(args.apk or default_apk).resolve();info=json.loads(apk.with_name('build-info.json').read_text());bundled=info['roms_bundled']
+assert info.get('target','quest')==args.target,'APK was built for '+info.get('target','quest')
 with zipfile.ZipFile(apk) as z:
     assert z.testzip() is None
     manifest=z.read('assets/roms.sha256').decode().splitlines()
@@ -41,23 +48,29 @@ with zipfile.ZipFile(apk) as z:
         elf=z.read(lib);assert elf[:5]==b'\x7fELF\x02';assert struct.unpack_from('<H',elf,18)[0]==183,lib
     assert z.read('classes.dex')[:4]==b'dex\n'
     for name in ['namco22-LICENSE.txt','SDL2-LICENSE.txt','OpenXR-LICENSE.txt']:assert z.read('assets/licenses/'+name)
-badging=subprocess.check_output([str(ROOT/'.tools/buildtools/android-15/aapt.exe'),'dump','badging',str(apk)],text=True)
-assert "package: name='org.timecrisis.quest'" in badging
+badging=subprocess.check_output([str(BT/('aapt'+EXE)),'dump','badging',str(apk)],text=True)
+assert f"package: name='{package}'" in badging
 entry='MainActivity' if bundled else 'LauncherActivity'
 assert f"launchable-activity: name='org.timecrisis.quest.{entry}'" in badging
-tree=subprocess.check_output([str(ROOT/'.tools/buildtools/android-15/aapt.exe'),'dump','xmltree',str(apk),'AndroidManifest.xml'],text=True)
+tree=subprocess.check_output([str(BT/('aapt'+EXE)),'dump','xmltree',str(apk),'AndroidManifest.xml'],text=True)
 activities=re.findall(r'(?ms)^([ ]+)E: activity\b(.*?)(?=^\1E: |\Z)',tree)
-main=next(block for _,block in activities if '=".MainActivity"' in block)
-setup=next(block for _,block in activities if '=".LauncherActivity"' in block)
-for category in ('org.khronos.openxr.intent.category.IMMERSIVE_HMD','com.oculus.intent.category.VR'):
+# Both builds use the shared org.timecrisis.quest classes, short or fully qualified.
+def activity(name):return next(block for _,block in activities if re.search(r'="(?:org\.timecrisis\.quest)?\.'+name+'"',block))
+main=activity('MainActivity');setup=activity('LauncherActivity')
+categories=['org.khronos.openxr.intent.category.IMMERSIVE_HMD']+(['com.oculus.intent.category.VR'] if args.target=='quest' else [])
+for category in categories:
     assert category in main,'The actual OpenXR activity must be marked immersive'
     assert category not in setup,'Setup must not masquerade as the immersive game'
-assert 'org.timecrisis.quest.setup' in setup,'Setup needs a separate Android task'
+assert package+'.setup' in setup,'Setup needs a separate Android task'
 assert ('android.intent.category.LAUNCHER' in main)==bundled
 assert "native-code: 'arm64-v8a'" in badging
-assert 'quest2|quest3|quest3s' in tree,'Quest 2 must not fall back to an older-device compatibility profile'
-readelf=ROOT/'.tools/ndk/android-ndk-r27c/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-readelf.exe'
-symbols=subprocess.check_output([str(readelf),'--dyn-syms',str(ROOT/'build/package-libs/libmain.so')],text=True)
+if args.target=='quest':assert 'quest2|quest3|quest3s' in tree,'Quest 2 must not fall back to an older-device compatibility profile'
+if args.target=='frame':
+    assert 'com.oculus' not in tree,'Steam Frame manifest must not carry Quest-only entries'
+    preferences=json.loads(apk.with_name('vrpreferences.json').read_text())
+    assert preferences['steam_frame']['preferMinRefreshRate']>=72,'vrpreferences.json must sit beside the APK'
+readelf=ROOT/(f'.tools/ndk/android-ndk-r27c/toolchains/llvm/prebuilt/{bootstrap.HOST}-x86_64/bin/llvm-readelf'+EXE)
+symbols=subprocess.check_output([str(readelf),'--dyn-syms',str(ROOT/'build'/libs_dir/'libmain.so')],text=True)
 assert ' SDL_main' in symbols
 assert info['sha256']==hashlib.sha256(apk.read_bytes()).hexdigest()
-print(f'APK verified: bundled={bundled}, 31 chip hashes, gun, ARM64/DEX/SDL_main, {entry} launcher, actual game marked immersive, isolated setup task, licenses and hash')
+print(f'APK verified ({args.target}): bundled={bundled}, 31 chip hashes, gun, ARM64/DEX/SDL_main, {entry} launcher, actual game marked immersive, isolated setup task, licenses and hash')

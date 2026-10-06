@@ -1,11 +1,36 @@
-"""Quest build: ROM-free APK by default, optional APK bundling supplied ROMs."""
+"""Quest or Steam Frame build: ROM-free APK by default, optional APK bundling supplied ROMs."""
 from pathlib import Path
 import argparse, hashlib, json, os, shutil, subprocess, sys, tempfile, zipfile
 import xml.etree.ElementTree as ET
 import bootstrap, patch_upstream, translate_crate
 ROOT=Path(__file__).resolve().parents[1]
 BUILD=ROOT/'build'
-JAVA=Path(os.environ.get('JAVA_HOME',r'C:\Program Files\Android\Android Studio\jbr'))/'bin'
+EXE='.exe' if bootstrap.HOST=='windows' else ''
+NDK=ROOT/'.tools/ndk/android-ndk-r27c'
+NDK_BIN=NDK/f'toolchains/llvm/prebuilt/{bootstrap.HOST}-x86_64/bin'
+# Per headset: manifest, categories the game activity must keep, package and APK names.
+TARGETS={
+    'quest':{'manifest':ROOT/'quest/AndroidManifest.xml','package':'org.timecrisis.quest','main':'.MainActivity','setup':'.LauncherActivity',
+             'categories':{'android.intent.category.LAUNCHER','org.khronos.openxr.intent.category.IMMERSIVE_HMD','com.oculus.intent.category.VR'},
+             'apk':ROOT/'artifacts/TimeCrisisVR-quest3-debug.apk','bundled':ROOT/'artifacts/bundled/TimeCrisisVR-with-ROM.apk','extra':[]},
+    'frame':{'manifest':ROOT/'frame/AndroidManifest.xml','package':'org.timecrisis.frame','main':'org.timecrisis.quest.MainActivity','setup':'org.timecrisis.quest.LauncherActivity',
+             'categories':{'android.intent.category.LAUNCHER','org.khronos.openxr.intent.category.IMMERSIVE_HMD'},
+             'apk':ROOT/'artifacts/frame/TimeCrisisVR-frame-debug.apk','bundled':ROOT/'artifacts/frame/bundled/TimeCrisisVR-frame-with-ROM.apk','extra':[ROOT/'frame/vrpreferences.json']},
+}
+def java_bin():
+    """First working JDK: JAVA_HOME, Android Studio's (Windows), macOS java_home, Homebrew."""
+    candidates=[os.environ.get('JAVA_HOME'),r'C:\Program Files\Android\Android Studio\jbr','/Applications/Android Studio.app/Contents/jbr/Contents/Home']
+    if bootstrap.HOST=='darwin':
+        found=subprocess.run(['/usr/libexec/java_home'],capture_output=True,text=True)
+        candidates+=[found.stdout.strip(),'/opt/homebrew/opt/openjdk','/usr/local/opt/openjdk']
+    for home in filter(None,candidates):
+        java=Path(home)/'bin'/('java'+EXE)
+        try:
+            if java.is_file() and subprocess.run([str(java),'-version'],capture_output=True).returncode==0:return java.parent
+        except OSError:pass  # e.g. an x86-only JDK on Apple silicon without Rosetta
+    raise RuntimeError('No working JDK found; set JAVA_HOME')
+JAVA=None
+def native_dir():return BUILD/('native' if args.target=='quest' else 'native-'+args.target)
 def run(args,cwd=ROOT):
     print('> '+' '.join(map(str,args)),flush=True)
     subprocess.run(list(map(str,args)),cwd=cwd,check=True)
@@ -38,11 +63,13 @@ def prepare_sound():
 def package_manifest(bundle_roms):
     """The OpenXR activity must retain its own VR categories in both variants."""
     ET.register_namespace('android','http://schemas.android.com/apk/res/android')
-    tree=ET.parse(ROOT/'quest/AndroidManifest.xml');ns='{http://schemas.android.com/apk/res/android}'
+    target=TARGETS[args.target]
+    tree=ET.parse(target['manifest']);ns='{http://schemas.android.com/apk/res/android}'
+    assert tree.getroot().get('package')==target['package']
     activities={a.get(ns+'name'):a for a in tree.getroot().find('application').findall('activity')}
-    main=activities['.MainActivity'];setup=activities['.LauncherActivity']
+    main=activities[target['main']];setup=activities[target['setup']]
     categories={c.get(ns+'name') for c in main.findall('intent-filter/category')}
-    assert {'android.intent.category.LAUNCHER','org.khronos.openxr.intent.category.IMMERSIVE_HMD','com.oculus.intent.category.VR'}<=categories
+    assert target['categories']<=categories
     if not bundle_roms:
         # Setup is a separate 2D task. Its handoff targets the VR-marked activity.
         for intent in main.findall('intent-filter'):
@@ -51,9 +78,28 @@ def package_manifest(bundle_roms):
         intent=ET.SubElement(setup,'intent-filter')
         ET.SubElement(intent,'action',{ns+'name':'android.intent.action.MAIN'})
         ET.SubElement(intent,'category',{ns+'name':'android.intent.category.LAUNCHER'})
-    output=BUILD/('AndroidManifest-bundled.xml' if bundle_roms else 'AndroidManifest-rom-free.xml')
+    output=BUILD/(f'AndroidManifest-{args.target}-'+('bundled.xml' if bundle_roms else 'rom-free.xml'))
     tree.write(output,encoding='utf-8',xml_declaration=True)
     return output
+
+def sdl_java():
+    """SDL's Java glue, staged with guarded fixes; the downloaded SDL stays untouched.
+    Steam Frame's Lepton has no clipboard service, and SDL 2.30 dereferences it in
+    onCreate. The game never uses the clipboard, so a missing service is tolerated."""
+    source=ROOT/'.tools/sdl/SDL2-2.30.11/android-project/app/src/main/java'
+    staged=BUILD/'sdl-java'
+    if staged.exists():shutil.rmtree(staged)
+    shutil.copytree(source,staged)
+    activity=staged/'org/libsdl/app/SDLActivity.java';text=activity.read_text(encoding='utf-8')
+    for old,new in [
+        ('getSystemService(Context.CLIPBOARD_SERVICE);\n       mClipMgr.addPrimaryClipChangedListener(this);','getSystemService(Context.CLIPBOARD_SERVICE);\n       if (mClipMgr != null) mClipMgr.addPrimaryClipChangedListener(this);'),
+        ('       return mClipMgr.hasPrimaryClip();','       return mClipMgr != null && mClipMgr.hasPrimaryClip();'),
+        ('        ClipData clip = mClipMgr.getPrimaryClip();','        ClipData clip = mClipMgr != null ? mClipMgr.getPrimaryClip() : null;'),
+        ('       mClipMgr.removePrimaryClipChangedListener(this);\n       ClipData clip','       if (mClipMgr == null) return;\n       mClipMgr.removePrimaryClipChangedListener(this);\n       ClipData clip')]:
+        if text.count(old)!=1:raise RuntimeError('SDL Java changed: '+old.strip()[:60])
+        text=text.replace(old,new)
+    activity.write_text(text,encoding='utf-8')
+    return list(staged.rglob('*.java'))
 
 def package(assets):
     models=assets/'models';models.mkdir(exist_ok=True)
@@ -62,14 +108,15 @@ def package(assets):
     shutil.copy2(model,models/model.name)
     (assets/'models.sha256').write_text(hashlib.sha256(model.read_bytes()).hexdigest()+'  '+model.name+'\n',encoding='ascii')
     bt=ROOT/'.tools/buildtools/android-15';android=ROOT/'.tools/platform/android-34-ext12/android.jar'
+    target=TARGETS[args.target]
     classes=BUILD/'classes';classes.mkdir(exist_ok=True)
-    sources=list((ROOT/'.tools/sdl/SDL2-2.30.11/android-project/app/src/main/java').rglob('*.java'))+list((ROOT/'quest/java').rglob('*.java'))
+    sources=sdl_java()+list((ROOT/'quest/java').rglob('*.java'))
     argfile=BUILD/'javac.args'
     argfile.write_text('\n'.join('"'+str(p).replace('\\','/')+'"' for p in sources))
-    run([JAVA/'javac.exe','-source','8','-target','8','-classpath',android,'-d',classes,'@'+str(argfile)])
-    jar=BUILD/'classes.jar';run([JAVA/'jar.exe','--create','--file',jar,'-C',classes,'.'])
+    run([JAVA/('javac'+EXE),'-source','8','-target','8','-classpath',android,'-d',classes,'@'+str(argfile)])
+    jar=BUILD/'classes.jar';run([JAVA/('jar'+EXE),'--create','--file',jar,'-C',classes,'.'])
     dex=BUILD/'dex';dex.mkdir(exist_ok=True)
-    run([JAVA/'java.exe','-cp',bt/'lib/d8.jar','com.android.tools.r8.D8','--lib',android,'--min-api','29','--output',dex,jar])
+    run([JAVA/('java'+EXE),'-cp',bt/'lib/d8.jar','com.android.tools.r8.D8','--lib',android,'--min-api','29','--output',dex,jar])
     licenses=assets/'licenses';licenses.mkdir(exist_ok=True)
     for source,name in [(ROOT/'LICENSE','TimeCrisisVR-LICENSE.txt'),(ROOT/'NOTICE.md','NOTICE.md'),(ROOT/'upstream/LICENSE','namco22-LICENSE.txt'),(ROOT/'.tools/sdl/SDL2-2.30.11/LICENSE.txt','SDL2-LICENSE.txt'),(ROOT/'.tools/openxr/META-INF/LICENSE','OpenXR-LICENSE.txt')]:
         shutil.copy2(source,licenses/name)
@@ -84,39 +131,41 @@ def package(assets):
         manifest=[line for line in (assets/'roms.sha256').read_text().splitlines() if line.split('  ',1)[1]!='c71.bin']
         assert len(manifest)==31
         (public/'roms.sha256').write_text('\n'.join(manifest)+'\n',encoding='ascii')
-        run([bt/'aapt2.exe','link','--manifest',package_manifest(args.bundle_roms),'-I',android,'-A',public,'-o',base])
-    strip=ROOT/'.tools/ndk/android-ndk-r27c/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-strip.exe'
-    libs=BUILD/'package-libs';libs.mkdir(exist_ok=True)
-    for name,source in [('libmain.so',BUILD/'native/libmain.so'),('libSDL2.so',BUILD/'native/sdl/libSDL2.so'),('libopenxr_loader.so',ROOT/'.tools/openxr/prefab/modules/openxr_loader/libs/android.arm64-v8a/libopenxr_loader.so')]:
+        run([bt/('aapt2'+EXE),'link','--manifest',package_manifest(args.bundle_roms),'-I',android,'-A',public,'-o',base])
+    strip=NDK_BIN/('llvm-strip'+EXE)
+    libs=BUILD/('package-libs' if args.target=='quest' else 'package-libs-'+args.target);libs.mkdir(exist_ok=True)
+    for name,source in [('libmain.so',native_dir()/'libmain.so'),('libSDL2.so',native_dir()/'sdl/libSDL2.so'),('libopenxr_loader.so',ROOT/'.tools/openxr/prefab/modules/openxr_loader/libs/android.arm64-v8a/libopenxr_loader.so')]:
         run([strip,'--strip-unneeded','-o',libs/name,source])
     with zipfile.ZipFile(base,'a',zipfile.ZIP_DEFLATED) as z:
         if not args.bundle_roms:assert not any(n.startswith('assets/roms/') or n.endswith('timecris.zip') for n in z.namelist())
         for p in dex.glob('*.dex'):z.write(p,p.name)
         for p in libs.glob('*.so'):z.write(p,'lib/arm64-v8a/'+p.name)
-    output=ROOT/('artifacts/bundled/TimeCrisisVR-with-ROM.apk' if args.bundle_roms else 'artifacts/TimeCrisisVR-quest3-debug.apk');output.parent.mkdir(parents=True,exist_ok=True)
-    run([bt/'zipalign.exe','-f','-P','16','4',base,output])
+    output=target['bundled'] if args.bundle_roms else target['apk'];output.parent.mkdir(parents=True,exist_ok=True)
+    run([bt/('zipalign'+EXE),'-f','-P','16','4',base,output])
     key=ROOT/'.tools/debug.keystore'
-    if not key.exists():run([JAVA/'keytool.exe','-genkeypair','-keystore',key,'-storepass','android','-alias','androiddebugkey','-keypass','android','-keyalg','RSA','-keysize','2048','-validity','10000','-dname','CN=Android Debug,O=Android,C=US'])
-    signer=[JAVA/'java.exe','-jar',bt/'lib/apksigner.jar']
+    if not key.exists():run([JAVA/('keytool'+EXE),'-genkeypair','-keystore',key,'-storepass','android','-alias','androiddebugkey','-keypass','android','-keyalg','RSA','-keysize','2048','-validity','10000','-dname','CN=Android Debug,O=Android,C=US'])
+    signer=[JAVA/('java'+EXE),'-jar',bt/'lib/apksigner.jar']
     run(signer+['sign','--ks',key,'--ks-key-alias','androiddebugkey','--ks-pass','pass:android','--key-pass','pass:android',output])
-    run(signer+['verify','--verbose',output]);run([bt/'zipalign.exe','-c','-P','16','4',output])
-    report={'apk':output.name,'sha256':hashlib.sha256(output.read_bytes()).hexdigest(),'bytes':output.stat().st_size,'upstream':subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT/'upstream',text=True).strip(),'abi':'arm64-v8a','roms_bundled':args.bundle_roms,'rom_sha256':hashlib.sha256(args.rom.read_bytes()).hexdigest(),'hardware_tested':False}
-    manifest=ET.parse(ROOT/'quest/AndroidManifest.xml').getroot();ns='{http://schemas.android.com/apk/res/android}'
+    run(signer+['verify','--verbose',output]);run([bt/('zipalign'+EXE),'-c','-P','16','4',output])
+    report={'apk':output.name,'sha256':hashlib.sha256(output.read_bytes()).hexdigest(),'bytes':output.stat().st_size,'upstream':subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT/'upstream',text=True).strip(),'target':args.target,'package':target['package'],'abi':'arm64-v8a','roms_bundled':args.bundle_roms,'rom_sha256':hashlib.sha256(args.rom.read_bytes()).hexdigest(),'hardware_tested':False}
+    for extra in target['extra']:shutil.copy2(extra,output.parent/extra.name)
+    manifest=ET.parse(target['manifest']).getroot();ns='{http://schemas.android.com/apk/res/android}'
     report['version_name']=manifest.get(ns+'versionName');report['version_code']=int(manifest.get(ns+'versionCode'))
     (output.parent/'build-info.json').write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps(report,indent=2))
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--rom',type=Path,default=Path.home()/'Downloads/timecris.zip');p.add_argument('--jobs',type=int,default=2);p.add_argument('--package-only',action='store_true');p.add_argument('--skip-prepare',action='store_true');p.add_argument('--bundle-roms',action='store_true',help='Include the supplied ROM files in the APK');args=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--rom',type=Path,default=Path.home()/'Downloads/timecris.zip');p.add_argument('--jobs',type=int,default=2);p.add_argument('--package-only',action='store_true');p.add_argument('--skip-prepare',action='store_true');p.add_argument('--bundle-roms',action='store_true',help='Include the supplied ROM files in the APK');p.add_argument('--target',choices=sorted(TARGETS),default='quest',help='Headset: quest (Meta Quest 3) or frame (Valve Steam Frame)');args=p.parse_args()
     if not args.rom.is_file():p.error('ROM not found: '+str(args.rom))
-    BUILD.mkdir(exist_ok=True)
+    BUILD.mkdir(exist_ok=True);JAVA=java_bin()
     if not args.package_only:
         for item in bootstrap.PACKAGES:bootstrap.fetch(item)
         patch_upstream.main()
         assets=BUILD/'assets' if args.skip_prepare else prepare(args.rom)
         prepare_sound()
-        ndk=ROOT/'.tools/ndk/android-ndk-r27c'
-        run(['cmake','-Wno-dev','-Wno-deprecated','-S',ROOT/'quest','-B',BUILD/'native','-G','Ninja','-DCMAKE_MAKE_PROGRAM='+str(ROOT/'.tools/ninja/ninja.exe'),'-DCMAKE_TOOLCHAIN_FILE='+str(ndk/'build/cmake/android.toolchain.cmake'),'-DANDROID_ABI=arm64-v8a','-DANDROID_PLATFORM=android-29','-DANDROID_STL=c++_static','-DCMAKE_BUILD_TYPE=Release'])
-        run(['cmake','--build',BUILD/'native','--parallel',args.jobs])
+        # One native tree per headset: the platform source and defines differ.
+        native=native_dir()
+        run(['cmake','-Wno-dev','-Wno-deprecated','-S',ROOT/'quest','-B',native,'-G','Ninja','-DCMAKE_MAKE_PROGRAM='+str(ROOT/'.tools/ninja'/('ninja'+EXE)),'-DCMAKE_TOOLCHAIN_FILE='+str(NDK/'build/cmake/android.toolchain.cmake'),'-DTCVR_TARGET='+args.target,'-DANDROID_ABI=arm64-v8a','-DANDROID_PLATFORM=android-29','-DANDROID_STL=c++_static','-DCMAKE_BUILD_TYPE=Release'])
+        run(['cmake','--build',native,'--parallel',args.jobs])
     else:assets=BUILD/'assets'
     package(assets)

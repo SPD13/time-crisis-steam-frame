@@ -6,7 +6,11 @@
 
 static char paths[40][100];
 static unsigned path_count,action_count,space_count,binding_count;
-static XrActionSuggestedBinding suggested[16];
+static XrActionSuggestedBinding suggested[20];
+#ifdef TCVR_FRAME
+static XrActionSuggestedBinding frame_suggested[20];
+static unsigned frame_count;
+#endif
 static XrActionType types[10];
 static bool dual[10],buttons[10][3],connected[2]={true,true},tracked[2]={true,true};
 static float triggers[2],grips[2];
@@ -45,7 +49,14 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateAction(XrActionSet set,const XrActionCrea
     *out=(XrAction)(uintptr_t)n;return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrSuggestInteractionProfileBindings(XrInstance i,const XrInteractionProfileSuggestedBinding *s){
-    (void)i;assert(!strcmp(paths[s->interactionProfile],"/interaction_profiles/oculus/touch_controller"));
+    (void)i;
+#ifdef TCVR_FRAME
+    if(!strcmp(paths[s->interactionProfile],"/interaction_profiles/valve/frame_controller_valve")){
+        frame_count=s->countSuggestedBindings;assert(frame_count<=20);
+        memcpy(frame_suggested,s->suggestedBindings,frame_count*sizeof frame_suggested[0]);return XR_SUCCESS;
+    }
+#endif
+    assert(!strcmp(paths[s->interactionProfile],"/interaction_profiles/oculus/touch_controller"));
     binding_count=s->countSuggestedBindings;assert(binding_count<=16);
     memcpy(suggested,s->suggestedBindings,binding_count*sizeof suggested[0]);return XR_SUCCESS;
 }
@@ -121,6 +132,21 @@ int main(void){
         snprintf(name,sizeof name,"%s/output/haptic",prefix);bound(haptic_action,name);
     }
     bound(pause_action,"/user/hand/left/input/menu/click");bound(hand_action,"/user/hand/right/input/thumbstick/click");
+#ifdef TCVR_FRAME
+    /* Steam Frame: the left hand's X, Y and Menu become stick click, d-pad left/right and View. */
+    assert(frame_count==15);memcpy(suggested,frame_suggested,frame_count*sizeof suggested[0]);binding_count=frame_count;
+    for(int h=0;h<2;h++){
+        char name[100];const char *prefix=h?"/user/hand/right":"/user/hand/left";
+        snprintf(name,sizeof name,"%s/input/aim/pose",prefix);bound(aim_action,name);
+        snprintf(name,sizeof name,"%s/input/trigger/value",prefix);bound(trigger_action,name);
+        snprintf(name,sizeof name,"%s/input/squeeze/value",prefix);bound(grip_action,name);
+        snprintf(name,sizeof name,"%s/output/haptic",prefix);bound(haptic_action,name);
+    }
+    bound(lower_action,"/user/hand/right/input/a/click");bound(upper_action,"/user/hand/right/input/b/click");
+    bound(lower_action,"/user/hand/left/input/thumbstick/click");
+    bound(upper_action,"/user/hand/left/input/dpad_left/click");bound(upper_action,"/user/hand/left/input/dpad_right/click");
+    bound(pause_action,"/user/hand/left/input/view/click");bound(hand_action,"/user/hand/right/input/thumbstick/click");
+#endif
     tick();assert(gun_position.x==.25f&&gun_origin.x==.25f&&aim_valid);
     /* Either grip exposes; only releasing both hides. Trigger no longer opens cover. */
     grips[LEFT_HAND]=.9f;tick();assert((arcade_bits&0x30)==0x20);

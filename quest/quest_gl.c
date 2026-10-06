@@ -134,6 +134,24 @@ void qgl_stereo_blit(int eye){
     glBindVertexArray(vao);glDrawArrays(GL_TRIANGLES,0,3);
     glBindTexture(GL_TEXTURE_2D,bindings[1]);glActiveTexture(active?GL_TEXTURE1:GL_TEXTURE0);
 }
+/* sRGB-only swapchains without GL_EXT_sRGB_write_control: the eye image is
+ * already display-encoded, so decode it here and let the sRGB store re-encode
+ * the original values. Texture unit 4 is not used by the renderer. */
+static GLuint linear_program;
+bool qgl_linearize_init(void){
+    if(!linear_program)linear_program=link_program(
+        "#version 300 es\nprecision highp float;out vec2 uv;void main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));uv=p;gl_Position=vec4(p*2.0-1.0,0,1);}",
+        "#version 300 es\nprecision highp float;in vec2 uv;uniform sampler2D eyeTex;out vec4 frag;void main(){vec4 c=texture(eyeTex,uv);frag=vec4(mix(c.rgb/12.92,pow((c.rgb+0.055)/1.055,vec3(2.4)),step(vec3(0.04045),c.rgb)),c.a);}");
+    if(linear_program){glUseProgram(linear_program);glUniform1i(glGetUniformLocation(linear_program,"eyeTex"),4);glUseProgram(program);}
+    return linear_program!=0;
+}
+void qgl_linearize_blit(unsigned source,unsigned framebuffer,int w,int h){
+    qgl_flush();glBindFramebuffer(GL_FRAMEBUFFER,framebuffer);glViewport(0,0,w,h);
+    glDisable(GL_BLEND);glDisable(GL_SCISSOR_TEST);glDisable(GL_DEPTH_TEST);glDisable(GL_CULL_FACE);glColorMask(1,1,1,1);
+    glActiveTexture(GL_TEXTURE4);glBindTexture(GL_TEXTURE_2D,source);
+    glUseProgram(linear_program);glBindVertexArray(vao);glDrawArrays(GL_TRIANGLES,0,3);
+    glBindTexture(GL_TEXTURE_2D,0);glActiveTexture(active?GL_TEXTURE1:GL_TEXTURE0);glUseProgram(program);
+}
 static int atlas_layer(GLuint texture){
     if(texture)for(int i=0;i<atlas_pages;i++)if(atlas_ids[i]==texture)return i;
     return -1;
@@ -343,6 +361,7 @@ void eng_post_lut(const uint8_t lut[3][256],int w,int h){
     glBindTexture(GL_TEXTURE_2D,binding[1]);glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,binding[0]);active=0;
 }
 void qgl_shutdown(void){
+    glDeleteProgram(linear_program);linear_program=0;
     glDeleteFramebuffers(1,&post_copy_fb);post_copy_fb=0;
     if(multi_active)qgl_stereo_end();
     glDeleteProgram(multi_program);glDeleteProgram(multi_post);glDeleteTextures(1,&multi_texture);glDeleteTextures(1,&multi_lut);glDeleteFramebuffers(1,&multi_fb);

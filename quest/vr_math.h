@@ -21,6 +21,16 @@ static inline Q4 yaw_only(Q4 q) {
     V3 f=rotate(q,v3(0,0,-1)); float y=atan2f(-f.x,-f.z)*0.5f;
     return (Q4){0,sinf(y),0,cosf(y)};
 }
+static inline Q4 rotation_x(float degrees) { float h=degrees*3.14159265f/360; return (Q4){sinf(h),0,0,cosf(h)}; }
+/* Steam Frame controller: aim pose from the palm pose. Components of SteamVR's
+ * frame_controller render models (metres; X rotation in degrees; the left hand
+ * mirrors X), as used on device by lemmix-frame's FrameOffsets. */
+static inline void aim_from_palm(V3 palm,Q4 palm_rotation,bool left,V3 *aim,Q4 *aim_rotation) {
+    Q4 hand=rotation_x(-39.4f),pointer=rotation_x(-40);
+    V3 offset=rotate(conjugate(hand),sub(v3(-.012694f,-.02522f,.020687f),v3(.01125f,-.00182941f,.1019482f)));
+    if (left) offset.x=-offset.x;
+    *aim=add(palm,rotate(palm_rotation,offset)); *aim_rotation=product(palm_rotation,product(conjugate(hand),pointer));
+}
 static inline bool ray_triangle(V3 o,V3 d,V3 a,V3 b,V3 c,float *distance) {
     V3 e1=sub(b,a),e2=sub(c,a),p=cross(d,e2); float det=dot(e1,p);
     if (fabsf(det)<1e-7f) return false;

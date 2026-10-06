@@ -1,4 +1,4 @@
-/* Quest host for the existing SS22 scheduler. All OpenXR/GL work stays on SDL's main thread. */
+/* Quest, Steam Frame (Lepton) and PCVR host for the existing SS22 scheduler. All OpenXR/GL work stays on SDL's main thread. */
 #ifdef TCVR_PC
 #include <windows.h>
 #include <unknwn.h>
@@ -48,12 +48,15 @@ static XrInstance instance;
 static XrSession session;
 enum { LEFT_HAND,RIGHT_HAND,HAND_COUNT };
 static XrPath hand_paths[HAND_COUNT];
-static XrSpace local_space,aim_spaces[HAND_COUNT];
+static XrSpace local_space,aim_spaces[HAND_COUNT],palm_spaces[HAND_COUNT];
 static XrActionSet action_set;
-static XrAction aim_action,trigger_action,grip_action,lower_action,upper_action,pause_action,haptic_action,hand_action;
+static XrAction aim_action,trigger_action,grip_action,lower_action,upper_action,pause_action,haptic_action,hand_action,palm_action;
 static XrSessionState state;
 static bool running,quit,active,focused,paused,origin_set,recenter_requested;
 static bool multiview;
+/* Palm pose: SteamVR has left the Frame's aim pose untracked while its palm pose tracked. */
+static bool palm_enabled;
+static int pose_sources[HAND_COUNT]={-1,-1};
 typedef struct ButtonEdge { bool synced,was; } ButtonEdge;
 static ButtonEdge coin_button,recenter_button,pause_button,laser_button,cover_button,hand_button;
 typedef struct FireTrigger { bool armed,pressed; } FireTrigger;
@@ -85,7 +88,19 @@ static bool aim_valid,gun_tracked;
 static uint64_t recoil_started;
 static int coin_frames;
 static const ss22_host_game *host;
-static struct Eye { XrSwapchain chain;uint32_t w,h,n;QSwapchainImage *images;GLuint *fb,depth; } eyes[2];
+/* color/draw: private RGBA8 eye image, only for an sRGB-only runtime without sRGB write control. */
+static struct Eye { XrSwapchain chain;uint32_t w,h,n;QSwapchainImage *images;GLuint *fb,depth,color,draw; } eyes[2];
+static bool linearize_copy;
+#ifdef TCVR_FRAME
+#define QPLAT_NAME "Steam Frame"
+#define QPLAT_EYE_CAP 1728.f
+#elif defined(TCVR_PC)
+#define QPLAT_NAME "PCVR"
+#define QPLAT_EYE_CAP 2160.f
+#else
+#define QPLAT_NAME "Quest"
+#define QPLAT_EYE_CAP 1440.f
+#endif
 static double profile_parts[6],profile_thread;
 static double cpu_ms(void){
 #ifdef TCVR_PC
@@ -183,6 +198,15 @@ static bool action(XrAction *out,const char *name,const char *label,XrActionType
     snprintf(ci.actionName,sizeof ci.actionName,"%s",name);snprintf(ci.localizedActionName,sizeof ci.localizedActionName,"%s",label);
     return XR(xrCreateAction(action_set,&ci,out));
 }
+static bool suggest_bindings(const char *profile,const XrActionSuggestedBinding *bindings,uint32_t count){
+    XrInteractionProfileSuggestedBinding suggest={XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggest.interactionProfile=path(profile);suggest.countSuggestedBindings=count;suggest.suggestedBindings=bindings;
+    bool ok=XR(xrSuggestInteractionProfileBindings(instance,&suggest));
+#ifdef TCVR_FRAME
+    fprintf(stderr,"[XR] bindings %s (%u): %s\n",profile,count,ok?"accepted":"rejected");
+#endif
+    return ok;
+}
 static bool actions_init(void){
     XrActionSetCreateInfo ci={XR_TYPE_ACTION_SET_CREATE_INFO};strcpy(ci.actionSetName,"time_crisis");strcpy(ci.localizedActionSetName,"Time Crisis");
     if(!XR(xrCreateActionSet(instance,&ci,&action_set)))return false;
@@ -195,6 +219,34 @@ static bool actions_init(void){
        !action(&pause_action,"pause","Pause",XR_ACTION_TYPE_BOOLEAN_INPUT,false)||
        !action(&hand_action,"weapon_hand","Change weapon hand in options",XR_ACTION_TYPE_BOOLEAN_INPUT,false)||
        !action(&haptic_action,"recoil","Gun recoil",XR_ACTION_TYPE_VIBRATION_OUTPUT,true))return false;
+#ifdef TCVR_FRAME
+    if(palm_enabled&&!action(&palm_action,"palm","Gun palm",XR_ACTION_TYPE_POSE_INPUT,true))return false;
+    /* Steam Frame: A, B, X and Y are all on the right controller; the left has
+     * a d-pad and View. The left hand keeps its Quest jobs: thumbstick click
+     * for X, d-pad left/right for Y, View for the menu button. */
+    XrActionSuggestedBinding frame[]={
+        {aim_action,path("/user/hand/left/input/aim/pose")},
+        {aim_action,path("/user/hand/right/input/aim/pose")},
+        {trigger_action,path("/user/hand/left/input/trigger/value")},
+        {trigger_action,path("/user/hand/right/input/trigger/value")},
+        {grip_action,path("/user/hand/left/input/squeeze/value")},
+        {grip_action,path("/user/hand/right/input/squeeze/value")},
+        {lower_action,path("/user/hand/left/input/thumbstick/click")},
+        {lower_action,path("/user/hand/right/input/a/click")},
+        {upper_action,path("/user/hand/left/input/dpad_left/click")},
+        {upper_action,path("/user/hand/left/input/dpad_right/click")},
+        {upper_action,path("/user/hand/right/input/b/click")},
+        {pause_action,path("/user/hand/left/input/view/click")},
+        {hand_action,path("/user/hand/right/input/thumbstick/click")},
+        {haptic_action,path("/user/hand/left/output/haptic")},
+        {haptic_action,path("/user/hand/right/output/haptic")},
+        {palm_action,path("/user/hand/left/input/palm_ext/pose")},
+        {palm_action,path("/user/hand/right/input/palm_ext/pose")}};
+    /* Retry without the palm entries (last) if the runtime rejects them for this profile. */
+    uint32_t frame_count=sizeof(frame)/sizeof(frame[0]);
+    bool accepted=suggest_bindings("/interaction_profiles/valve/frame_controller_valve",frame,palm_action?frame_count:frame_count-2)||
+        (palm_action&&suggest_bindings("/interaction_profiles/valve/frame_controller_valve",frame,frame_count-2));
+#endif
     XrActionSuggestedBinding bindings[]={
         {aim_action,path("/user/hand/left/input/aim/pose")},
         {aim_action,path("/user/hand/right/input/aim/pose")},
@@ -210,13 +262,19 @@ static bool actions_init(void){
         {hand_action,path("/user/hand/right/input/thumbstick/click")},
         {haptic_action,path("/user/hand/left/output/haptic")},
         {haptic_action,path("/user/hand/right/output/haptic")}};
-    XrInteractionProfileSuggestedBinding suggest={XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-    suggest.interactionProfile=path("/interaction_profiles/oculus/touch_controller");suggest.countSuggestedBindings=sizeof(bindings)/sizeof(bindings[0]);suggest.suggestedBindings=bindings;
-    if(!XR(xrSuggestInteractionProfileBindings(instance,&suggest)))return false;
+#ifdef TCVR_FRAME
+    /* SteamVR's Touch fallback maps Menu to View and X/Y to the d-pad. */
+    accepted|=suggest_bindings("/interaction_profiles/oculus/touch_controller",bindings,sizeof(bindings)/sizeof(bindings[0]));
+    if(!accepted){fprintf(stderr,"[XR] no controller profile accepted the bindings\n");return false;}
+#else
+    if(!suggest_bindings("/interaction_profiles/oculus/touch_controller",bindings,sizeof(bindings)/sizeof(bindings[0])))return false;
+#endif
     XrSessionActionSetsAttachInfo attach={XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};attach.countActionSets=1;attach.actionSets=&action_set;
     if(!XR(xrAttachSessionActionSets(session,&attach)))return false;
     XrActionSpaceCreateInfo space={XR_TYPE_ACTION_SPACE_CREATE_INFO};space.action=aim_action;space.poseInActionSpace.orientation.w=1;
     for(int i=0;i<HAND_COUNT;i++){space.subactionPath=hand_paths[i];if(!XR(xrCreateActionSpace(session,&space,&aim_spaces[i])))return false;}
+    space.action=palm_action;
+    for(int i=0;palm_action&&i<HAND_COUNT;i++){space.subactionPath=hand_paths[i];if(!XR(xrCreateActionSpace(session,&space,&palm_spaces[i])))return false;}
     return true;
 }
 /* Fresh edges only: a held button across focus/tracking loss cannot change a setting. */
@@ -242,6 +300,14 @@ static void capture_eye(int eye,int w,int h){
     free(pixels);if(eye==1)unlink("capture.request");
 }
 
+static void log_profiles(void){
+    for(int h=0;h<HAND_COUNT;h++){
+        XrInteractionProfileState profile={XR_TYPE_INTERACTION_PROFILE_STATE};char name[XR_MAX_PATH_LENGTH]="none";uint32_t length=0;
+        if(XR_SUCCEEDED(xrGetCurrentInteractionProfile(session,hand_paths[h],&profile))&&profile.interactionProfile)
+            xrPathToString(instance,profile.interactionProfile,sizeof name,&length,name);
+        fprintf(stderr,"[XR] %s hand profile: %s\n",h==LEFT_HAND?"left":"right",name);
+    }
+}
 static bool events(void){
     SDL_Event s;while(SDL_PollEvent(&s)){
         if(s.type==SDL_QUIT)quit=true;
@@ -270,6 +336,7 @@ static bool events(void){
             if(focused!=focus){focused=focus;reset_input_edges();game_deadline=0;ss22_input_neutral();eng_audio_set_volume(focus&&!paused?100:0);if(focus){rate_attempts=0;rate_check_time=0;}}
         }else if(e.type==XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING)quit=true;
         else if(e.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING){recenter_requested=true;}
+        else if(e.type==XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED){pose_sources[LEFT_HAND]=pose_sources[RIGHT_HAND]=-1;log_profiles();}
         else if(e.type==XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB){
             XrEventDataDisplayRefreshRateChangedFB *rate=(void*)&e;game_deadline=0;
             fprintf(stderr,"[XR] display changed %.0f -> %.0f Hz\n",rate->fromDisplayRefreshRate,rate->toDisplayRefreshRate);
@@ -321,6 +388,18 @@ static void sync_input(XrTime time,bool head_tracked,float head_y){
         XrActionStatePose pose={XR_TYPE_ACTION_STATE_POSE};locations[h]=(XrSpaceLocation){XR_TYPE_SPACE_LOCATION};
         tracked[h]=XR_SUCCEEDED(xrGetActionStatePose(session,&get,&pose))&&pose.isActive&&
             XR_SUCCEEDED(xrLocateSpace(aim_spaces[h],local_space,time,&locations[h]))&&(locations[h].locationFlags&required)==required;
+        int source=tracked[h]?0:-1;
+        if(!tracked[h]&&palm_spaces[h]){
+            get.action=palm_action;pose=(XrActionStatePose){XR_TYPE_ACTION_STATE_POSE};
+            if(XR_SUCCEEDED(xrGetActionStatePose(session,&get,&pose))&&pose.isActive&&
+               XR_SUCCEEDED(xrLocateSpace(palm_spaces[h],local_space,time,&locations[h]))&&(locations[h].locationFlags&required)==required){
+                V3 position;Q4 rotation;XrPosef *palm=&locations[h].pose;
+                aim_from_palm(vec(palm->position),quat(palm->orientation),h==LEFT_HAND,&position,&rotation);
+                palm->position=(XrVector3f){position.x,position.y,position.z};palm->orientation=(XrQuaternionf){rotation.x,rotation.y,rotation.z,rotation.w};
+                tracked[h]=true;source=1;
+            }
+        }
+        if(source>=0&&source!=pose_sources[h]){pose_sources[h]=source;fprintf(stderr,"[XR] %s gun pose: %s\n",h==LEFT_HAND?"left":"right",source?"palm (derived aim)":"aim");}
         available[h]=axis_state(trigger_action,hand_paths[h],&fire[h]);
         FireTrigger *button=&fire_triggers[h];
         if(paused||!tracked[h]||!available[h]){*button=(FireTrigger){0};continue;}
@@ -377,7 +456,7 @@ bool ss22_host_open(const ss22_host_game *g,int scale,bool full){
     gpu_ready=true;glDisable(GL_FRAMEBUFFER_SRGB);
     SDL_GL_SetSwapInterval(0);
     if(desktop)goto graphics_ready;
-    const char *extensions[5]={XR_KHR_OPENGL_ENABLE_EXTENSION_NAME};
+    const char *extensions[8]={XR_KHR_OPENGL_ENABLE_EXTENSION_NAME};
     uint32_t extension_count=1;
 #else
     gpu_ready=true;
@@ -386,7 +465,7 @@ bool ss22_host_open(const ss22_host_game *g,int scale,bool full){
     REQUIRE(xrGetInstanceProcAddr(XR_NULL_HANDLE,"xrInitializeLoaderKHR",(PFN_xrVoidFunction*)&init));
     XrLoaderInitInfoAndroidKHR loader={XR_TYPE_LOADER_INIT_INFO_ANDROID_KHR};loader.applicationVM=vm;loader.applicationContext=activity;
     REQUIRE(init((XrLoaderInitInfoBaseHeaderKHR*)&loader));
-    const char *extensions[5]={XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME,XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME};
+    const char *extensions[8]={XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME,XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME};
     uint32_t extension_count=2;
 #endif
     const char *optional[]={XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME,
@@ -395,13 +474,18 @@ bool ss22_host_open(const ss22_host_game *g,int scale,bool full){
 #else
         XR_KHR_ANDROID_THREAD_SETTINGS_EXTENSION_NAME,
 #endif
-        XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME};
-    bool enabled[3]={false,false,false};uint32_t available_count=0;
+        XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME,
+#ifdef TCVR_FRAME
+        "XR_VALVE_frame_controller_interaction","XR_EXT_palm_pose"};
+#else
+        "",""};
+#endif
+    bool enabled[5]={false,false,false,false,false};uint32_t available_count=0;
     REQUIRE(xrEnumerateInstanceExtensionProperties(NULL,0,&available_count,NULL));
     XrExtensionProperties *available=calloc(available_count,sizeof *available);if(!available)goto fail;
     for(uint32_t i=0;i<available_count;i++)available[i].type=XR_TYPE_EXTENSION_PROPERTIES;
     XrResult enumeration=xrEnumerateInstanceExtensionProperties(NULL,available_count,&available_count,available);
-    if(XR_SUCCEEDED(enumeration))for(int k=0;k<3;k++)for(uint32_t j=0;j<available_count;j++)if(!strcmp(optional[k],available[j].extensionName)){
+    if(XR_SUCCEEDED(enumeration))for(int k=0;k<5;k++)for(uint32_t j=0;j<available_count;j++)if(*optional[k]&&!strcmp(optional[k],available[j].extensionName)){
         extensions[extension_count++]=optional[k];enabled[k]=true;break;
     }
     free(available);if(!XR(enumeration))goto fail;
@@ -418,6 +502,10 @@ bool ss22_host_open(const ss22_host_game *g,int scale,bool full){
 #ifndef TCVR_PC
     (*env)->DeleteLocalRef(env,activity);
 #endif
+    XrInstanceProperties runtime={XR_TYPE_INSTANCE_PROPERTIES};
+    if(XR(xrGetInstanceProperties(instance,&runtime)))fprintf(stderr,"[XR] runtime %s %u.%u.%u\n",runtime.runtimeName,XR_VERSION_MAJOR(runtime.runtimeVersion),XR_VERSION_MINOR(runtime.runtimeVersion),XR_VERSION_PATCH(runtime.runtimeVersion));
+    for(uint32_t j=0;j<extension_count;j++)fprintf(stderr,"[XR] extension %s\n",extensions[j]);
+    palm_enabled=enabled[4];
     if(enabled[0])XR(xrGetInstanceProcAddr(instance,"xrPerfSettingsSetPerformanceLevelEXT",(PFN_xrVoidFunction*)&set_performance));
 #ifndef TCVR_PC
     if(enabled[1])XR(xrGetInstanceProcAddr(instance,"xrSetAndroidApplicationThreadKHR",(PFN_xrVoidFunction*)&set_thread));
@@ -471,19 +559,24 @@ bool ss22_host_open(const ss22_host_game *g,int scale,bool full){
     XrResult fmt_result=xrEnumerateSwapchainFormats(session,format_count,&format_count,formats);
     bool srgb_control=qcolor_srgb_write_control();
     int64_t color_format=XR_SUCCEEDED(fmt_result)?qcolor_swapchain_format(formats,format_count,srgb_control):0;
+    fprintf(stderr,"[XR] swapchain formats:");for(uint32_t i=0;XR_SUCCEEDED(fmt_result)&&i<format_count;i++)fprintf(stderr," 0x%llx",(long long)formats[i]);fprintf(stderr,"\n");
+#ifndef TCVR_PC
+    /* An sRGB-only runtime without write control: draw each eye into RGBA8,
+     * then decode it once into the sRGB image (see qgl_linearize_blit). */
+    for(uint32_t i=0;!color_format&&XR_SUCCEEDED(fmt_result)&&i<format_count;i++)if(formats[i]==GL_SRGB8_ALPHA8){color_format=GL_SRGB8_ALPHA8;linearize_copy=true;}
+#endif
     free(formats);if(!XR(fmt_result)||!color_format){fprintf(stderr,"[XR] No supported 8-bit color swapchain\n");goto fail;}
-    qcolor_raw_output(color_format);
-    fprintf(stderr,"[XR] swapchain %s; sRGB write control %s\n",color_format==GL_SRGB8_ALPHA8?"sRGB (raw arcade values)":"RGBA8 (legacy fallback)",srgb_control?"available":"unavailable");
+    if(!linearize_copy)qcolor_raw_output(color_format);
+    fprintf(stderr,"[XR] swapchain %s; sRGB write control %s\n",linearize_copy?"sRGB (linearizing copy)":color_format==GL_SRGB8_ALPHA8?"sRGB (raw arcade values)":"RGBA8 (legacy fallback)",srgb_control?"available":"unavailable");
+    float eye_cap=QPLAT_EYE_CAP;FILE *size_config=fopen("eye-size.txt","r");
+    if(size_config){if(fscanf(size_config,"%f",&eye_cap)!=1||eye_cap<256)eye_cap=QPLAT_EYE_CAP;fclose(size_config);}
     uint32_t view_count;REQUIRE(xrEnumerateViewConfigurationViews(instance,system,XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,0,&view_count,NULL));if(view_count!=2)goto fail;
     XrViewConfigurationView configs[2]={{XR_TYPE_VIEW_CONFIGURATION_VIEW},{XR_TYPE_VIEW_CONFIGURATION_VIEW}};
     REQUIRE(xrEnumerateViewConfigurationViews(instance,system,XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,2,&view_count,configs));
     for(int i=0;i<2;i++){
         struct Eye *eye=&eyes[i];eye->w=configs[i].recommendedImageRectWidth;eye->h=configs[i].recommendedImageRectHeight;
-#ifdef TCVR_PC
-        float factor=fminf(1,2160.f/fmaxf(eye->w,eye->h));
-#else
-        float factor=fminf(1,1440.f/fmaxf(eye->w,eye->h));
-#endif
+        /* A private eye-size.txt overrides the per-headset cap for benchmarks. */
+        float factor=fminf(1,eye_cap/fmaxf(eye->w,eye->h));
        eye->w=(uint32_t)(eye->w*factor);eye->h=(uint32_t)(eye->h*factor);
         XrSwapchainCreateInfo cc={XR_TYPE_SWAPCHAIN_CREATE_INFO};cc.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_SAMPLED_BIT;cc.format=color_format;cc.sampleCount=1;cc.width=eye->w;cc.height=eye->h;cc.faceCount=1;cc.arraySize=1;cc.mipCount=1;
         REQUIRE(xrCreateSwapchain(session,&cc,&eye->chain));REQUIRE(xrEnumerateSwapchainImages(eye->chain,0,&eye->n,NULL));
@@ -493,17 +586,27 @@ bool ss22_host_open(const ss22_host_game *g,int scale,bool full){
         glGenFramebuffers(eye->n,eye->fb);
         glGenRenderbuffers(1,&eye->depth);glBindRenderbuffer(GL_RENDERBUFFER,eye->depth);glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT24,eye->w,eye->h);
         for(uint32_t j=0;j<eye->n;j++){glBindFramebuffer(GL_FRAMEBUFFER,eye->fb[j]);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,eye->images[j].image,0);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,eye->depth);if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)goto fail;}
+        if(linearize_copy){
+            glGenTextures(1,&eye->color);glBindTexture(GL_TEXTURE_2D,eye->color);glTexStorage2D(GL_TEXTURE_2D,1,GL_RGBA8,eye->w,eye->h);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);glBindTexture(GL_TEXTURE_2D,0);
+            glGenFramebuffers(1,&eye->draw);glBindFramebuffer(GL_FRAMEBUFFER,eye->draw);
+            glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,eye->color,0);glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,eye->depth);
+            if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)goto fail;
+        }
         views[i]=(XrView){XR_TYPE_VIEW};
     }
 graphics_ready:
-    if(!qgl_init())goto fail;
+    if(!qgl_init()||(linearize_copy&&!qgl_linearize_init()))goto fail;
 #ifndef TCVR_PC
-    multiview=eyes[0].w==eyes[1].w&&eyes[0].h==eyes[1].h&&qgl_stereo_init(SDL_GL_GetProcAddress("glFramebufferTextureMultiviewOVR"));
+    /* A private multiview.off compares against separate eye passes on new drivers. */
+    bool multiview_off=!access("multiview.off",F_OK);
+    multiview=!multiview_off&&eyes[0].w==eyes[1].w&&eyes[0].h==eyes[1].h&&qgl_stereo_init(SDL_GL_GetProcAddress("glFramebufferTextureMultiviewOVR"));
+    fprintf(stderr,"[XR] GL %s; multiview %s\n",glGetString(GL_VERSION),multiview?"on":multiview_off?"off (multiview.off)":"unavailable");
 #endif
     if(!qgun_init("models/player-gun.tcgun"))goto fail;
     if(!qui_init())goto fail;
     ss22_gl_set_gun_flash(false);eng_audio_set_gain(g->out_gain);eng_audio_open();g->snd_set_output(true);g->input_init();
-    active=true;fprintf(stderr,"[XR] Renderer initialized: %ux%u per eye; %s\n",eyes[0].w,eyes[0].h,glGetString(GL_RENDERER));return true;
+    active=true;fprintf(stderr,"[XR] Renderer initialized (" QPLAT_NAME "): %ux%u per eye; %s\n",eyes[0].w,eyes[0].h,glGetString(GL_RENDERER));return true;
 fail:
     fprintf(stderr,"[XR] initialization failed; SDL: %s\n",SDL_GetError());ss22_host_close();return false;
 }
@@ -593,7 +696,7 @@ bool ss22_host_frame(void){
             XrSwapchainImageWaitInfo wait={XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wait.timeout=XR_INFINITE_DURATION;
             if(!XR(xrWaitSwapchainImage(eye->chain,&wait))){frame_ok=false;break;}
             parts[1]+=wall_ms()-stage_start;stage_start=wall_ms();
-            qgl_target(i,eye->fb[index]);
+            qgl_target(i,linearize_copy?eye->draw:eye->fb[index]);
             glViewport(0,0,eye->w,eye->h);
             qgl_eye(v[i],p[i]);
             if(stereo_frame)qgl_stereo_blit(i);else ss22_draw(eye->w,eye->h);
@@ -608,6 +711,7 @@ bool ss22_host_frame(void){
             capture_eye(i,eye->w,eye->h);
             parts[3]+=wall_ms()-stage_start;stage_start=wall_ms();
             const GLenum discard[]={GL_DEPTH_ATTACHMENT};glInvalidateFramebuffer(GL_FRAMEBUFFER,1,discard);
+            if(linearize_copy)qgl_linearize_blit(eye->color,eye->fb[index],eye->w,eye->h);
             GLenum error=glGetError();if(error)fprintf(stderr,"[XR] eye %d GL error 0x%x\n",i,error);
 #ifdef TCVR_PC
             if(i==0){
@@ -675,8 +779,9 @@ void ss22_host_shot(const char *p){(void)p;}
 void ss22_host_close(void){
     active=false;eng_audio_close();
     if(context&&gpu_ready){qui_shutdown();qgun_shutdown();qgl_shutdown();}
-    for(int i=0;i<2;i++){if(context&&gpu_ready&&eyes[i].fb)glDeleteFramebuffers(eyes[i].n,eyes[i].fb);if(context&&gpu_ready)glDeleteRenderbuffers(1,&eyes[i].depth);if(eyes[i].chain)xrDestroySwapchain(eyes[i].chain);free(eyes[i].images);free(eyes[i].fb);memset(&eyes[i],0,sizeof eyes[i]);}
-    for(int i=0;i<HAND_COUNT;i++){if(aim_spaces[i])xrDestroySpace(aim_spaces[i]);aim_spaces[i]=0;}
+    for(int i=0;i<2;i++){if(context&&gpu_ready&&eyes[i].fb)glDeleteFramebuffers(eyes[i].n,eyes[i].fb);if(context&&gpu_ready){glDeleteRenderbuffers(1,&eyes[i].depth);glDeleteFramebuffers(1,&eyes[i].draw);glDeleteTextures(1,&eyes[i].color);}if(eyes[i].chain)xrDestroySwapchain(eyes[i].chain);free(eyes[i].images);free(eyes[i].fb);memset(&eyes[i],0,sizeof eyes[i]);}
+    for(int i=0;i<HAND_COUNT;i++){if(aim_spaces[i])xrDestroySpace(aim_spaces[i]);if(palm_spaces[i])xrDestroySpace(palm_spaces[i]);aim_spaces[i]=palm_spaces[i]=0;}
+    palm_action=XR_NULL_HANDLE;palm_enabled=linearize_copy=false;
     if(local_space)xrDestroySpace(local_space);
     if(session)xrDestroySession(session);if(action_set)xrDestroyActionSet(action_set);if(instance)xrDestroyInstance(instance);
     local_space=0;session=0;action_set=0;instance=0;running=false;

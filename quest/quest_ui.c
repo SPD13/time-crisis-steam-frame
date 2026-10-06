@@ -26,6 +26,18 @@ static void text(int x,int y,const char *s,uint8_t r,uint8_t g,uint8_t b){
         }
     }
 }
+/* Left-controller key names: the Steam Frame has a d-pad and View instead of X, Y and Menu. */
+#ifdef TCVR_FRAME
+#define LEFT_LOWER "L STICK CLICK"
+#define LEFT_UPPER "D-PAD L/R"
+#define LEFT_LASER "D-PAD L/R: ON/OFF"
+#define LEFT_MENU "VIEW"
+#else
+#define LEFT_LOWER "X LEFT"
+#define LEFT_UPPER "Y LEFT"
+#define LEFT_LASER "Y: ON / OFF"
+#define LEFT_MENU "LEFT MENU"
+#endif
 static void panel(bool laser,bool physical_crouch,bool left_handed,bool saved){
     for(int y=0;y<HEIGHT;y++)for(int x=0;x<WIDTH;x++){
         uint8_t *p=pixels+(y*WIDTH+x)*4;bool border=x<2||x>=WIDTH-2||y<2||y>=HEIGHT-2;
@@ -36,19 +48,19 @@ static void panel(bool laser,bool physical_crouch,bool left_handed,bool saved){
     text(24,94,"RIGHT STICK CLICK: CHANGE DEFAULT",181,207,220);
     text(24,118,"EITHER TRIGGER: SELECT HAND + FIRE",181,207,220);
     text(24,160,"LASER:",255,255,255);text(160,160,laser?"ON":"OFF",laser?94:228,laser?226:235,laser?151:239);
-    text(336,160,left_handed?"Y: ON / OFF":"B: ON / OFF",181,207,220);
+    text(336,160,left_handed?LEFT_LASER:"B: ON / OFF",181,207,220);
     text(24,202,physical_crouch?"COVER: PHYSICAL DUCKING":"COVER: GRIP BUTTONS",255,255,255);
-    text(24,234,left_handed?"B RIGHT: CHANGE MODE":"Y LEFT: CHANGE MODE",181,207,220);
+    text(24,234,left_handed?"B RIGHT: CHANGE MODE":LEFT_UPPER ": CHANGE MODE",181,207,220);
     text(24,276,physical_crouch?"UPRIGHT: OUT / DUCK: COVER":"HOLD EITHER GRIP: LEAVE COVER",255,255,255);
     if(physical_crouch){
-        text(24,308,left_handed?"A RIGHT: RESET UPRIGHT HEIGHT":"X LEFT: RESET UPRIGHT HEIGHT",181,207,220);
+        text(24,308,left_handed?"A RIGHT: RESET UPRIGHT HEIGHT":LEFT_LOWER ": RESET UPRIGHT HEIGHT",181,207,220);
         text(24,336,"STAND OR SIT UPRIGHT FIRST",181,207,220);
     }else{
         text(24,308,"RELEASE BOTH: COVER / RELOAD",181,207,220);
-        text(24,336,left_handed?"A RIGHT: RECENTER":"X LEFT: RECENTER",181,207,220);
+        text(24,336,left_handed?"A RIGHT: RECENTER":LEFT_LOWER ": RECENTER",181,207,220);
     }
-    text(24,384,left_handed?"X LEFT: ADD CREDITS":"A RIGHT: ADD CREDITS",181,207,220);
-    text(24,438,saved?"LEFT MENU: RESUME":"SAVING FAILED",saved?170:255,saved?193:150,saved?206:150);
+    text(24,384,left_handed?LEFT_LOWER ": ADD CREDITS":"A RIGHT: ADD CREDITS",181,207,220);
+    text(24,438,saved?LEFT_MENU ": RESUME":"SAVING FAILED",saved?170:255,saved?193:150,saved?206:150);
 }
 static GLuint shader(GLenum type,const char *source){
     GLuint s=glCreateShader(type);qgpu_shader_source(s,source);glCompileShader(s);GLint ok;glGetShaderiv(s,GL_COMPILE_STATUS,&ok);

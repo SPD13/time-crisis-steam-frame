@@ -14,4 +14,6 @@ void qgl_atlas_texture(unsigned texture,int page,int dimension,int pages);
 void qgl_flush(void);
 void qgl_flat_camera(float cx,float cy,float focal);
 void qgl_pointer(V3 origin,V3 end);
+bool qgl_linearize_init(void);
+void qgl_linearize_blit(unsigned source,unsigned framebuffer,int w,int h);
 void qgl_shutdown(void);

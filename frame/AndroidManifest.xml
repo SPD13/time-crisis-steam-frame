@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Steam Frame build: runs in Lepton (Android 11 container). The Java classes are shared with the Quest build. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.timecrisis.frame" android:versionCode="17" android:versionName="0.8.3-frame-experimental">
+  <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="30" />
+  <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+  <uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="false" />
+  <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+  <uses-permission android:name="android.permission.VIBRATE" />
+  <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
+  <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
+  <queries>
+    <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
+    <intent><action android:name="org.khronos.openxr.OpenXRRuntimeService" /></intent>
+    <intent><action android:name="org.khronos.openxr.OpenXRApiLayerService" /></intent>
+  </queries>
+  <application android:label="Time Crisis VR (Experimental)" android:allowBackup="false" android:debuggable="true" android:extractNativeLibs="true" android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" android:hardwareAccelerated="true">
+    <activity android:name="org.timecrisis.quest.LauncherActivity" android:exported="true" android:screenOrientation="landscape" android:taskAffinity="org.timecrisis.frame.setup" android:excludeFromRecents="true" />
+    <activity android:name="org.timecrisis.quest.MainActivity" android:exported="true" android:screenOrientation="landscape" android:launchMode="singleTask" android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode|density">
+      <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /><category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" /></intent-filter>
+    </activity>
+  </application>
+</manifest>

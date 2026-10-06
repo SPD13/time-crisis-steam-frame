@@ -83,5 +83,10 @@ int main(void){
     for(int i=0;i<4;i++){q.rv[i].sx16=(i==1||i==2?640:0)*16;q.rv[i].sy16=(i>=2?480:0)*16;}
     qvr_scene_begin();for(int n=0;n<230;n++)qvr_scene_quad(&q);qvr_sprites_prepare(&mark,1);
     assert(qvr_sprite_corners(&mark,0,corners));near(corners[0][2],-29.4f);
-    puts("PASS: VR timing/math, supported refresh selection, camera-aligned HUD/aim, surface shot marks, nearest hit, grid overflow and unchanged desktop projection");return 0;
+    /* Frame palm fallback: aim ahead of and above the palm, almost along its -Z; left mirrors X. */
+    V3 aim;Q4 aim_rotation;aim_from_palm(v3(1,1,1),(Q4){0,0,0,1},false,&aim,&aim_rotation);
+    near(aim.x,1-.023944f);near(aim.y,1+.033502f);near(aim.z,1-.077639f);
+    V3 forward=rotate(aim_rotation,v3(0,0,-1));near(forward.x,0);assert(forward.z<-.999f&&fabsf(forward.y)<.011f);
+    aim_from_palm(v3(0,0,0),turn,true,&aim,&aim_rotation);V3 local=rotate(conjugate(turn),aim);near(local.x,.023944f);near(local.z,-.077639f);
+    puts("PASS: VR timing/math, Frame palm-to-aim, supported refresh selection, camera-aligned HUD/aim, surface shot marks, nearest hit, grid overflow and unchanged desktop projection");return 0;
 }
