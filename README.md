@@ -1,6 +1,6 @@
 # Time Crisis VR for Meta Quest, Windows and Steam Frame
 
-> **This is a fork of [DR-89/time-crisis-vr](https://github.com/DR-89/time-crisis-vr), focused on the development of the Valve Steam Frame edition.** It keeps the original Quest and Windows ports and adds a Steam Frame build: see [Steam Frame](#steam-frame-experimental) and the [install guide](docs/STEAM_FRAME_INSTALL.md). Quest and Windows releases come from the original repository.
+> **This is a fork of [DR-89/time-crisis-vr](https://github.com/DR-89/time-crisis-vr), focused on the development of the Valve Steam Frame edition.** It keeps the original Quest and Windows ports and adds a Steam Frame build: see [Steam Frame](#steam-frame-experimental) and the **[Steam Frame install guide](https://github.com/SPD13/time-crisis-steam-frame/blob/master/docs/STEAM_FRAME_INSTALL.md)**. Quest and Windows releases come from the original repository.
 
 An experimental VR port of **Time Crisis** for **Meta Quest** and **Windows PCVR**, with a tracked 3D pistol, stereo rendering, original arcade gameplay and sound, and a choice of physical ducking or grip-controlled cover. Tested on Quest 3; the APK also declares Quest 2 and Quest 3S compatibility. The Windows build includes a mouse-controlled monitor mode.
 
