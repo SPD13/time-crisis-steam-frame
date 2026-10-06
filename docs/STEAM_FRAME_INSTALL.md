@@ -65,10 +65,10 @@ Use `timecris-flat.zip` in the next steps. The game needs 31 chips; `c71.bin` is
 
 ## 2. Build the game
 
-Clone this fork with its engine submodule. Its `steam-frame` branch holds the Steam Frame edition:
+Clone this fork with its engine submodule:
 
 ```sh
-git clone --recurse-submodules -b steam-frame https://github.com/SPD13/time-crisis-steam-frame.git
+git clone --recurse-submodules https://github.com/SPD13/time-crisis-steam-frame.git
 cd time-crisis-steam-frame
 ```
 
