@@ -4,7 +4,7 @@ An experimental VR port of **Time Crisis** for **Meta Quest** and **Windows PCVR
 
 **Built on [spacestate1/namco22-decompile](https://github.com/spacestate1/namco22-decompile).** This project adds the Android/OpenXR host, Quest renderer, VR aiming, player weapon and controls to that reconstruction. The original arcade logic and shared engine come from upstream; this is not an independent recreation of the game.
 
-[Downloads](https://github.com/DR-89/time-crisis-vr/releases) · [Quest quickstart](docs/QUICKSTART.md) · [Windows / PCVR](docs/PCVR.md) · [Technical notes](docs/DEVELOPMENT.md) · [Attribution](NOTICE.md)
+[Downloads](https://github.com/DR-89/time-crisis-vr/releases) · [Quest quickstart](docs/QUICKSTART.md) · [Windows / PCVR](docs/PCVR.md) · [Steam Frame install guide](docs/STEAM_FRAME_INSTALL.md) · [Technical notes](docs/DEVELOPMENT.md) · [Attribution](NOTICE.md)
 
 ![Time Crisis running on Quest 3, with the tracked player pistol](docs/images/gameplay.png)
 
@@ -44,6 +44,26 @@ Changes in v0.8.0:
 The direct immersive Quest launcher fix from v0.7.3 is retained. Versions v0.7.1 and v0.7.2 could open as a flat panel.
 
 The headset is asked to run at **120 Hz** when the runtime supports it, with a supported lower-rate fallback. This is a target, not a guarantee of perfectly stable 120 FPS. Quest 2's actual rate still needs a device measurement. See the measured results below.
+
+## Steam Frame (experimental)
+
+This fork adds a **Valve Steam Frame** edition with the same game, options and controls, built from the same sources. It is an Android APK that runs on the headset in Lepton, Valve's Android compatibility layer, and is installed into the Frame's Steam library as **Time Crisis VR**, with its own artwork. It has been run on a Steam Frame; a complete validation is still pending.
+
+**→ [Install on a Steam Frame: step-by-step guide](docs/STEAM_FRAME_INSTALL.md)**
+
+In short, with your own `timecris.zip` and the Frame in Developer Mode:
+
+```sh
+./build-frame.sh path/to/timecris.zip --bundle-roms   # build the APK with your ROMs
+./register-frame.sh                                   # install it into the Frame's Steam library
+```
+
+The left controller has a d-pad and View instead of X, Y and Menu, so on the Frame:
+- **thumbstick click** replaces X;
+- **d-pad left/right** replaces Y;
+- **View** replaces Menu.
+
+Technical details, differences from the Quest build and diagnostics are in the [Steam Frame technical notes](docs/STEAM_FRAME.md).
 
 ## Download and install
 

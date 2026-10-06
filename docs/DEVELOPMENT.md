@@ -3,6 +3,7 @@
 ## Layout
 
 - `quest/`: Android entry points, OpenXR host, GLES renderer, controller/input/UI and weapon asset.
+- `frame/`: Steam Frame target: Android manifest and `vrpreferences.json`. The code is compiled from `quest/` with `TCVR_FRAME` (Frame controller bindings, menu labels and eye size in `quest_host.c`/`quest_ui.c`). Select with `tools/build.py --target quest|frame` (CMake `TCVR_TARGET`). `tests/test_handedness.py` exercises both binding sets.
 - `upstream/`: pinned [namco22-decompile](https://github.com/spacestate1/namco22-decompile) Git submodule.
 - `pc/`: Windows entry, OpenGL loader and CMake build; shares the Quest renderer/host.
 - `tools/patch_upstream.py`: guarded, idempotent changes to seven engine files and the Time Crisis dispatcher.
@@ -10,7 +11,7 @@
 - `tools/build.py`: local ROM preparation, DSP/sound translation, CMake build, asset packaging, signing and alignment.
 - `tests/`: native math, GLES image comparisons, settings/cover, ROM import and package validation.
 
-Use `git submodule update --init` after a non-recursive clone. Do not commit generated upstream sources or extracted game files. ROM files are inputs to the local build, not Git source files.
+The build runs on Windows, macOS and Linux; `tools/bootstrap.py` fetches the host's NDK and build tools. Use `git submodule update --init` after a non-recursive clone. Do not commit generated upstream sources or extracted game files. ROM files are inputs to the local build, not Git source files.
 
 ## Tests
 
